@@ -372,7 +372,7 @@ void FindReplaceDlg::create(int dialogID, bool isRTL, bool msgDestParent, bool t
 	}
 	else
 	{
-		goToCenter(swpFlags);
+		goToTopRight(swpFlags);
 	}
 
 	if (nppGUI._findWindowLessMode)
