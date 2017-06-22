@@ -313,7 +313,7 @@ void FindReplaceDlg::create(int dialogID, bool isRTL, bool msgDestParent)
 	}
 	else
 	{
-		goToCenter();
+		goToTopRight();
 	}
 }
 

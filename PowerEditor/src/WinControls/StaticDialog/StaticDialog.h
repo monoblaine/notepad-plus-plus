@@ -49,6 +49,8 @@ public :
 
 	void goToCenter();
 
+	void goToTopRight();
+
 	void display(bool toShow = true, bool enhancedPositioningCheckWhenShowing = false) const;
 
 	RECT getViewablePositionRect(RECT testRc) const;
