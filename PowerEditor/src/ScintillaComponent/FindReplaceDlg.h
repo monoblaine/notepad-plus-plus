@@ -324,6 +324,17 @@ public :
 		}
 	};
 
+	void hideFinder()
+	{
+		if (_pFinder)
+		{
+			::SendMessage(::GetParent(_pFinder->_hParent), NPPM_DMMHIDE, 0, reinterpret_cast<LPARAM>(_pFinder->_hSelf));
+			_pFinder->display(false);
+			_pFinder->setClosed(true);
+			(*(_pFinder->_ppEditView))->getFocus();
+		}
+	}
+
 	HWND getHFindResults() {
 		if (_pFinder)
 			return _pFinder->_scintView.getHSelf();
