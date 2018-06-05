@@ -3677,7 +3677,7 @@ void Notepad_plus::updateStatusBar()
 
 	TCHAR strDocLen[256];
 	wsprintf(strDocLen, TEXT("length : %s    lines : %s"),
-		commafyInt(_pEditView->getCurrentDocLen()).c_str(),
+		commafyInt(getCurrentDocCharCount(_pEditView->getCurrentBuffer()->getUnicodeMode())).c_str(),
 		commafyInt(_pEditView->execute(SCI_GETLINECOUNT)).c_str());
 	_statusBar.setText(strDocLen, STATUSBAR_DOC_SIZE);
 
