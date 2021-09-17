@@ -274,7 +274,7 @@ constexpr LineMarker::FoldPart PartForBar(bool markBefore, bool markAfter) {
 }
 
 void MarginView::PaintOneMargin(Surface *surface, PRectangle rc, PRectangle rcOneMargin, const MarginStyle &marginStyle,
-	const EditModel &model, const ViewStyle &vs) const {
+	const EditModel &model, const ViewStyle &vs, const int scrollOffset) const {
 	const Point ptOrigin = model.GetVisibleOriginInMain();
 	const Sci::Line lineStartPaint = static_cast<Sci::Line>(rcOneMargin.top + ptOrigin.y) / vs.lineHeight;
 	Sci::Line visibleLine = model.TopLineOfMain() + lineStartPaint;
@@ -305,7 +305,7 @@ void MarginView::PaintOneMargin(Surface *surface, PRectangle rc, PRectangle rcOn
 	const MarkerOutline folderEnd = SubstituteMarkerIfEmpty(MarkerOutline::FolderEnd,
 		MarkerOutline::Folder, vs);
 
-	while ((visibleLine < model.pcs->LinesDisplayed()) && yposScreen < rc.bottom) {
+	while ((visibleLine < model.pcs->LinesDisplayed()) && yposScreen < rc.bottom + (scrollOffset == 0 ? 0 : vs.lineHeight)) {
 
 		PLATFORM_ASSERT(visibleLine < model.pcs->LinesDisplayed());
 		const Sci::Line lineDoc = model.pcs->DocFromDisplay(visibleLine);
@@ -363,9 +363,9 @@ void MarginView::PaintOneMargin(Surface *surface, PRectangle rc, PRectangle rcOn
 
 		const PRectangle rcMarker(
 			rcOneMargin.left,
-			yposScreen,
+			yposScreen + scrollOffset,
 			rcOneMargin.right,
-			yposScreen + vs.lineHeight);
+			yposScreen + scrollOffset + vs.lineHeight);
 		if (marginStyle.style == MarginType::Number) {
 			if (firstSubLine) {
 				std::string sNumber;
@@ -462,7 +462,7 @@ void MarginView::PaintOneMargin(Surface *surface, PRectangle rc, PRectangle rcOn
 }
 
 void MarginView::PaintMargin(Surface *surface, Sci::Line topLine, PRectangle rc, PRectangle rcMargin,
-	const EditModel &model, const ViewStyle &vs) {
+	const EditModel &model, const ViewStyle &vs, const int scrollOffset) {
 
 	PRectangle rcOneMargin = rcMargin;
 	rcOneMargin.right = rcMargin.left;
@@ -512,7 +512,7 @@ void MarginView::PaintMargin(Surface *surface, Sci::Line topLine, PRectangle rc,
 					model.pdoc->SciLineFromPosition(model.sel.MainCaret()), lastLine);
 			}
 
-			PaintOneMargin(surface, rc, rcOneMargin, marginStyle, model, vs);
+			PaintOneMargin(surface, rc, rcOneMargin, marginStyle, model, vs, scrollOffset);
 		}
 	}
 

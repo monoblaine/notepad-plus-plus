@@ -196,6 +196,7 @@ EditView::EditView() {
 	tabArrowHeight = 4;
 	customDrawTabArrow = nullptr;
 	customDrawWrapMarker = nullptr;
+	scrollOffset = 0;
 }
 
 EditView::~EditView() = default;
@@ -2531,9 +2532,9 @@ void EditView::PaintText(Surface *surfaceWindow, const EditModel &model, const V
 		}
 		for (;;) {
 			int yposScreen = screenLinePaintFirst * vsDraw.lineHeight;
-			int ypos = bufferedDraw ? 0 : yposScreen;
+			int ypos = bufferedDraw ? 0 : (yposScreen + scrollOffset);
 			Sci::Line lineVisible = model.TopLineOfMain() + screenLinePaintFirst;
-			while (lineVisible < model.pcs->LinesDisplayed() && yposScreen < rcArea.bottom) {
+			while (lineVisible < model.pcs->LinesDisplayed() && yposScreen < rcArea.bottom + (scrollOffset == 0 ? 0 : vsDraw.lineHeight)) {
 
 				const Sci::Line lineDoc = model.pcs->DocFromDisplay(lineVisible);
 				// Only visible lines should be handled by the code within the loop
@@ -2598,9 +2599,10 @@ void EditView::PaintText(Surface *surfaceWindow, const EditModel &model, const V
 
 					if (bufferedDraw) {
 						const Point from = Point::FromInts(vsDraw.textStart - leftTextOverlap, 0);
-						const PRectangle rcCopyArea = PRectangle::FromInts(vsDraw.textStart - leftTextOverlap, yposScreen,
+						const PRectangle rcCopyArea = PRectangle::FromInts(vsDraw.textStart - leftTextOverlap
+							, yposScreen + scrollOffset,
 							static_cast<int>(rcClient.right - vsDraw.rightMarginWidth),
-							yposScreen + vsDraw.lineHeight);
+							yposScreen + scrollOffset + vsDraw.lineHeight);
 						pixmapLine->FlushDrawing();
 						surfaceWindow->Copy(rcCopyArea, from, *pixmapLine);
 					}
