@@ -1123,6 +1123,30 @@ void Notepad_plus::command(int id)
 
 		case IDM_VIEW_DOCLIST:
 		{
+			int curView = currentView();
+			DocTabView* currentTab = (curView == MAIN_VIEW) ? &_mainDocTab : &_subDocTab;
+			int currentTabIndex = currentTab->getCurrentTabIndex();
+			int toActivate = 0;
+			TaskListInfo taskListInfo;
+			::SendMessage(_pPublicInterface->getHSelf(), WM_GETTASKLISTINFO, reinterpret_cast<WPARAM>(&taskListInfo), 0);
+			size_t i, n = taskListInfo._tlfsLst.size();
+
+			for (i = 0; i < n; i++) {
+				TaskLstFnStatus& tfs = taskListInfo._tlfsLst[i];
+
+				if (tfs._iView != curView || currentTabIndex == tfs._docIndex) {
+					continue;
+				}
+
+				toActivate = tfs._docIndex;
+				break;
+			}
+
+			_isFolding = true;
+			switchToFile(currentTab->getBufferByIndex(toActivate));
+			_isFolding = false;
+			break;
+
 			if (_pDocumentListPanel && (!_pDocumentListPanel->isClosed()))
 			{
 				_pDocumentListPanel->display(false);
