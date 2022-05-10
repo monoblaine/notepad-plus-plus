@@ -369,6 +369,10 @@ public :
 		}
 	}
 
+	bool finderExistsAndIsVisible() {
+		return _pFinder && _pFinder->isVisible();
+	}
+
 	HWND getHFindResults() {
 		if (_pFinder)
 			return _pFinder->_scintView.getHSelf();
