@@ -3251,6 +3251,7 @@ void Editor::Duplicate(bool forLine) {
 	}
 	UndoGroup ug(pdoc);
 	std::string_view eol;
+	const bool shouldPrepend = true;
 	if (forLine) {
 		eol = pdoc->EOLString();
 	}
@@ -3264,9 +3265,16 @@ void Editor::Duplicate(bool forLine) {
 		}
 		std::string text = RangeText(start.Position(), end.Position());
 		Sci::Position lengthInserted = 0;
-		if (forLine)
-			lengthInserted = pdoc->InsertString(end.Position(), eol);
-		pdoc->InsertString(end.Position() + lengthInserted, text);
+		if (shouldPrepend) {
+			lengthInserted = pdoc->InsertString(start.Position(), text);
+			if (forLine)
+				pdoc->InsertString(start.Position() + lengthInserted, eol);
+		}
+		else {
+			if (forLine)
+		    	lengthInserted = pdoc->InsertString(end.Position(), eol);
+			pdoc->InsertString(end.Position() + lengthInserted, text);
+		}
 	}
 	if (sel.Count() && sel.IsRectangular()) {
 		SelectionPosition last = sel.Last();
