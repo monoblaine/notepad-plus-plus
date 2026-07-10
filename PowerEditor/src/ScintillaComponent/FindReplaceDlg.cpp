@@ -226,13 +226,28 @@ bool Searching::readBase(const wchar_t * str, int * value, int base, int size)
 
 void Searching::displaySectionCentered(size_t posStart, size_t posEnd, ScintillaEditView * pEditView, bool isDownwards)
 {
+	// Despite the historical name, this no longer centres the match: VISIBLE_SLOP only
+	// scrolls when the target is outside the viewport (with a near-full-screen slop).
+	const bool useSmooth = pEditView->execute(SCI_GETSMOOTHSCROLLING) != 0;
+	const intptr_t startTop = pEditView->execute(SCI_GETFIRSTVISIBLELINE);
+	const intptr_t startXOffset = pEditView->execute(SCI_GETXOFFSET);
+	const HWND hSci = pEditView->getHSelf();
+
+	if (useSmooth)
+	{
+		// Compute the final scroll position with instant scrolling, without painting
+		// intermediate jumps or nesting a smooth-scroll job mid-calculation.
+		pEditView->execute(SCI_SETSMOOTHSCROLLING, false);
+		::SendMessage(hSci, WM_SETREDRAW, FALSE, 0);
+	}
+
 	// Make sure target lines are unfolded
 	pEditView->execute(SCI_ENSUREVISIBLE, pEditView->execute(SCI_LINEFROMPOSITION, posStart));
 	pEditView->execute(SCI_ENSUREVISIBLE, pEditView->execute(SCI_LINEFROMPOSITION, posEnd));
 
 	auto linesVisible = pEditView->execute(SCI_LINESONSCREEN);
 
-	// Jump-scroll to center, if current position is out of view
+	// Scroll into view with slop when the match is outside the current viewport
 	pEditView->execute(SCI_SETVISIBLEPOLICY, VISIBLE_SLOP, linesVisible - 5 - 1);
 	pEditView->execute(SCI_ENSUREVISIBLEENFORCEPOLICY, pEditView->execute(SCI_LINEFROMPOSITION, isDownwards ? posEnd : posStart));
 	// When searching up, the beginning of the (possible multiline) result is important, when scrolling down the end
@@ -264,6 +279,30 @@ void Searching::displaySectionCentered(size_t posStart, size_t posEnd, Scintilla
 	// does up/down arrow as first navigation after the search result is selected,
 	// the caret doesn't jump to an unexpected column
 	pEditView->execute(SCI_CHOOSECARETX);
+
+	if (useSmooth)
+	{
+		const intptr_t endTop = pEditView->execute(SCI_GETFIRSTVISIBLELINE);
+		const intptr_t endXOffset = pEditView->execute(SCI_GETXOFFSET);
+
+		// Rewind to the pre-search origin (still unpainted), then animate from there.
+		if (endTop != startTop)
+			pEditView->execute(SCI_SETFIRSTVISIBLELINE, startTop);
+		if (endXOffset != startXOffset)
+			pEditView->execute(SCI_SETXOFFSET, startXOffset);
+
+		::SendMessage(hSci, WM_SETREDRAW, TRUE, 0);
+		pEditView->execute(SCI_SETSMOOTHSCROLLING, true);
+		::InvalidateRect(hSci, nullptr, TRUE);
+
+		// Vertical: opt-in animated jump (SCI_SETFIRSTVISIBLELINE stays instant for tab restores).
+		if (endTop != startTop)
+			pEditView->execute(SCI_SMOOTHSCROLLTO, endTop);
+
+		// Horizontal remains instant (smooth scrolling is vertical-only).
+		if (endXOffset != startXOffset)
+			pEditView->execute(SCI_SETXOFFSET, endXOffset);
+	}
 }
 
 FindReplaceDlg::~FindReplaceDlg()

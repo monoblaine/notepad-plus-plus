@@ -859,6 +859,7 @@ public:
 	Scintilla::Technology Technology();
 	void SetSmoothScrolling(bool smoothScrolling);
 	bool SmoothScrolling();
+	void SmoothScrollTo(Line displayLine);
 	void *CreateLoader(Position bytes, Scintilla::DocumentOption documentOptions);
 	void FindIndicatorShow(Position start, Position end);
 	void FindIndicatorFlash(Position start, Position end);

@@ -470,10 +470,17 @@ namespace Scintilla::Internal {
 		float progress;
 		int direction;
 		float spd;
+		// Wall-clock absolute jumps (find results): progress is driven by elapsed time so
+		// slow paints cannot stretch a "100ms" animation into half a second.
+		bool timeBased = false;
+		ULONGLONG startMs = 0;
+		float durationMs = 0;
+		float totalPx = 0;
 	};
 
 	UINT_PTR timer_smooth_scroll = 0x123;
-	int timer_smooth_scroll_interval = 10;
+	// Poll often; actual step size for absolute jumps comes from elapsed wall time.
+	int timer_smooth_scroll_interval = 8;
 
 #if defined(USE_D2D)
 
@@ -702,6 +709,10 @@ class ScintillaWin :
 	void GetMouseParameters() noexcept;
 	void CopyToGlobal(GlobalMemory &gmUnicode, const SelectionText &selectedText);
 	void CopyToClipboard(const SelectionText &selectedText) override;
+	void SmoothScrollBy(Sci::Line linesToScroll);
+	void SmoothScrollTo(Sci::Line targetLine);
+	void SmoothPageMove(int direction, Selection::SelTypes selt = Selection::SelTypes::none, bool stuttered = false);
+	int KeyCommand(Scintilla::Message iMessage) override;
 	void ScrollMessage(WPARAM wParam);
 	void HorizontalScrollMessage(WPARAM wParam);
 	void FullPaint();
@@ -1992,36 +2003,8 @@ sptr_t ScintillaWin::MouseMessage(unsigned int iMessage, uptr_t wParam, sptr_t l
 				}
 			} else {
 				// Scroll
-				//smoothScrollTo(topLine + linesToScroll);
 				if (smoothScrolling) {
-					if (!scrollJob.active) {
-						scrollJob.active = true;
-						scrollJob.scrollSt = topLine;
-						scrollJob.scrollEd = std::clamp<Sci::Line>(topLine + linesToScroll, 0, MaxScrollPos());
-						scrollJob.progress = 0;
-						scrollJob.direction = linesToScroll < 0 ? -1 : 1;
-						scrollJob.spd = 6;
-						::SetTimer(MainHWND(), timer_smooth_scroll, timer_smooth_scroll_interval, 0);
-					} else {
-						//::KillTimer(MainHWND(), timer_smooth_scroll);
-						scrollJob.scrollEd = std::clamp<Sci::Line>(scrollJob.scrollEd + linesToScroll, 0, MaxScrollPos());
-						if (scrollJob.scrollEd < topLine) {
-							scrollJob.direction = -1;
-						} else if (scrollJob.scrollEd > topLine) {
-							scrollJob.direction = 1;
-						} else {
-							scrollJob.direction = linesToScroll < 0 ? -1 : 1;
-						}
-						float spd = 5;
-						float spdFac = fabs(topLine - scrollJob.scrollEd) / fmax(linesPerScroll, 1);
-						if (spdFac > 1) {
-							spd *= spdFac;
-						}
-						if (spd > scrollJob.spd) {
-							scrollJob.spd = spd;
-						}
-						//::SetTimer(MainHWND(), timer_smooth_scroll, timer_smooth_scroll_interval, 0);
-					}
+					SmoothScrollBy(linesToScroll);
 				} else {
 					ScrollTo(topLine + linesToScroll);
 				}
@@ -2337,8 +2320,21 @@ sptr_t ScintillaWin::SciMessage(Message iMessage, uptr_t wParam, sptr_t lParam) 
 		if (!smoothScrolling) {
 			::KillTimer(MainHWND(), timer_smooth_scroll);
 			view.scrollOffset = 0;
+			scrollJob.active = false;
+			scrollJob.timeBased = false;
 		}
 		return true;
+
+	case Message::SmoothScrollTo:
+		// Absolute animated jump (find results, etc.). Unlike SetFirstVisibleLine, this is
+		// opt-in so tab restores and other instant position changes stay instant.
+		if (smoothScrolling) {
+			SmoothScrollTo(LineFromUPtr(wParam));
+		} else {
+			ScrollTo(LineFromUPtr(wParam));
+		}
+		return 0;
+
 	case Message::SetTechnology:
 		if (const Technology technologyNew = static_cast<Technology>(wParam);
 			(technologyNew == Technology::Default) ||
@@ -2436,17 +2432,38 @@ sptr_t ScintillaWin::WndProc(Message iMessage, uptr_t wParam, sptr_t lParam) {
 			break;
 
 		case WM_TIMER:
-			if (wParam == idleTimerID && idler.state) {
-				SendMessage(MainHWND(), SC_WIN_IDLE, 0, 1);
-			} else {
-				TickFor(static_cast<TickReason>(wParam - fineTimerStart));
-			}
 			if (wParam == timer_smooth_scroll) {
-				float newProg = scrollJob.progress + scrollJob.spd * scrollJob.direction;
-				float newTop = scrollJob.scrollSt + newProg / vs.lineHeight;
-				if ((newTop - scrollJob.scrollEd) * scrollJob.direction >= 0) {
-					// stopped.
+				const float lineH = static_cast<float>(std::max(vs.lineHeight, 1));
+				float newProg = 0;
+				bool finished = false;
+
+				if (scrollJob.timeBased) {
+					// Map elapsed wall time → progress so dropped timer ticks / slow paints
+					// still finish on schedule instead of stretching the animation.
+					const ULONGLONG now = ::GetTickCount64();
+					const float elapsed = static_cast<float>(now - scrollJob.startMs);
+					float t = (scrollJob.durationMs > 0.0f) ? (elapsed / scrollJob.durationMs) : 1.0f;
+					if (t >= 1.0f) {
+						finished = true;
+					} else {
+						// Ease-in-out cubic: visible motion through the middle, soft land.
+						// (Pure ease-out reads as "almost instant" on short hops.)
+						const float eased = (t < 0.5f)
+							? (4.0f * t * t * t)
+							: (1.0f - std::pow(-2.0f * t + 2.0f, 3.0f) / 2.0f);
+						newProg = eased * scrollJob.totalPx * static_cast<float>(scrollJob.direction);
+					}
+				} else {
+					newProg = scrollJob.progress + scrollJob.spd * scrollJob.direction;
+					const float newTopProbe = scrollJob.scrollSt + newProg / lineH;
+					if ((newTopProbe - scrollJob.scrollEd) * scrollJob.direction >= 0) {
+						finished = true;
+					}
+				}
+
+				if (finished) {
 					scrollJob.active = false;
+					scrollJob.timeBased = false;
 					::KillTimer(MainHWND(), wParam);
 					view.scrollOffset = 0;
 					const Sci::Line topLineNew = std::clamp<Sci::Line>(scrollJob.scrollEd, 0, MaxScrollPos());
@@ -2456,9 +2473,9 @@ sptr_t ScintillaWin::WndProc(Message iMessage, uptr_t wParam, sptr_t lParam) {
 						Redraw();
 					}
 				} else {
-					// simple smooth scroll.
+					const float newTop = scrollJob.scrollSt + newProg / lineH;
 					const Sci::Line topLineNew = std::clamp<Sci::Line>(newTop, 0, MaxScrollPos());
-					view.scrollOffset = ((topLineNew - scrollJob.scrollSt) * vs.lineHeight - newProg);
+					view.scrollOffset = static_cast<int>((topLineNew - scrollJob.scrollSt) * lineH - newProg);
 					scrollJob.progress = newProg;
 					if (topLine != topLineNew) {
 						ScrollTo(topLineNew);
@@ -2466,6 +2483,10 @@ sptr_t ScintillaWin::WndProc(Message iMessage, uptr_t wParam, sptr_t lParam) {
 						Redraw();
 					}
 				}
+			} else if (wParam == idleTimerID && idler.state) {
+				SendMessage(MainHWND(), SC_WIN_IDLE, 0, 1);
+			} else {
+				TickFor(static_cast<TickReason>(wParam - fineTimerStart));
 			}
 			break;
 
@@ -2630,10 +2651,22 @@ sptr_t ScintillaWin::WndProc(Message iMessage, uptr_t wParam, sptr_t lParam) {
 		case Message::GrabFocus:
 		case Message::SetTechnology:
 		case Message::SetSmoothScrolling:
+		case Message::SmoothScrollTo:
 		case Message::SetBidirectional:
 		case Message::TargetAsUTF8:
 		case Message::EncodedFromUTF8:
 			return SciMessage(iMessage, wParam, lParam);
+
+		case Message::SetFirstVisibleLine:
+			// Instant restore path (tab switches, buffer activation). Never animate, and
+			// abort any in-flight smooth scroll so the new document is not dragged along.
+			if (scrollJob.active) {
+				::KillTimer(MainHWND(), timer_smooth_scroll);
+				scrollJob.active = false;
+				scrollJob.timeBased = false;
+				view.scrollOffset = 0;
+			}
+			return ScintillaBase::WndProc(iMessage, wParam, lParam);
 
 		default:
 			return ScintillaBase::WndProc(iMessage, wParam, lParam);
@@ -3711,6 +3744,178 @@ void ScintillaWin::CopyToClipboard(const SelectionText &selectedText) {
 	}
 }
 
+void ScintillaWin::SmoothScrollBy(Sci::Line linesToScroll) {
+	if (linesToScroll == 0) {
+		return;
+	}
+	if (!scrollJob.active) {
+		const Sci::Line target = std::clamp<Sci::Line>(topLine + linesToScroll, 0, MaxScrollPos());
+		if (target == topLine) {
+			return;
+		}
+		scrollJob.active = true;
+		scrollJob.timeBased = false;
+		scrollJob.scrollSt = topLine;
+		scrollJob.scrollEd = target;
+		scrollJob.progress = 0;
+		scrollJob.direction = linesToScroll < 0 ? -1 : 1;
+		// Larger distances (page jumps) start faster so animation does not feel sluggish.
+		const float distance = static_cast<float>(std::abs(target - topLine));
+		const float refLines = static_cast<float>(
+			(linesPerScroll == 0 || linesPerScroll == WHEEL_PAGESCROLL) ? 3u : linesPerScroll);
+		scrollJob.spd = std::max(6.0f, 6.0f * (distance / std::max(refLines, 1.0f)));
+		::SetTimer(MainHWND(), timer_smooth_scroll, timer_smooth_scroll_interval, 0);
+	} else if (scrollJob.timeBased) {
+		// Wheel input during a find-style jump: retarget as a new absolute hop from here.
+		SmoothScrollTo(std::clamp<Sci::Line>(topLine + linesToScroll, 0, MaxScrollPos()));
+	} else {
+		scrollJob.scrollEd = std::clamp<Sci::Line>(scrollJob.scrollEd + linesToScroll, 0, MaxScrollPos());
+		if (scrollJob.scrollEd < topLine) {
+			scrollJob.direction = -1;
+		} else if (scrollJob.scrollEd > topLine) {
+			scrollJob.direction = 1;
+		} else {
+			scrollJob.direction = linesToScroll < 0 ? -1 : 1;
+		}
+		// Scale speed with distance so large jumps (e.g. page scroll) stay responsive.
+		const float distance = static_cast<float>(std::abs(topLine - scrollJob.scrollEd));
+		const float refLines = static_cast<float>(
+			(linesPerScroll == 0 || linesPerScroll == WHEEL_PAGESCROLL) ? 3u : linesPerScroll);
+		float spd = 5;
+		const float spdFac = distance / std::max(refLines, 1.0f);
+		if (spdFac > 1) {
+			spd *= spdFac;
+		}
+		if (spd > scrollJob.spd) {
+			scrollJob.spd = spd;
+		}
+	}
+}
+
+void ScintillaWin::SmoothScrollTo(Sci::Line targetLine) {
+	// Absolute jumps (find navigation): wall-clock duration so short hops stay snappy even
+	// when each frame's paint takes longer than the timer interval.
+	const Sci::Line target = std::clamp<Sci::Line>(targetLine, 0, MaxScrollPos());
+	// Anchor from the live top line so a redirected mid-flight jump doesn't overshoot.
+	const Sci::Line from = topLine;
+	const Sci::Line delta = target - from;
+	if (delta == 0) {
+		if (scrollJob.active) {
+			scrollJob.active = false;
+			scrollJob.timeBased = false;
+			::KillTimer(MainHWND(), timer_smooth_scroll);
+			view.scrollOffset = 0;
+			Redraw();
+		}
+		return;
+	}
+
+	const float distance = static_cast<float>(std::abs(delta));
+	const float lineH = static_cast<float>(std::max(vs.lineHeight, 1));
+	const float screens = distance / static_cast<float>(std::max<Sci::Line>(LinesOnScreen(), 1));
+	// Long enough to read as smooth motion, short enough not to feel sluggish.
+	// Wall-clock timing keeps this honest even when paints are slow.
+	// ≤1 screen ≈ 200ms; each extra screen adds a bit, hard cap ~320ms.
+	const float durationMs = (screens <= 1.0f)
+		? 200.0f
+		: std::min(200.0f + (screens - 1.0f) * 40.0f, 320.0f);
+
+	scrollJob.active = true;
+	scrollJob.timeBased = true;
+	scrollJob.scrollSt = from;
+	scrollJob.scrollEd = target;
+	scrollJob.progress = 0;
+	scrollJob.direction = delta < 0 ? -1 : 1;
+	scrollJob.totalPx = distance * lineH;
+	scrollJob.durationMs = durationMs;
+	scrollJob.startMs = ::GetTickCount64();
+	scrollJob.spd = 0; // unused in time-based mode
+	::SetTimer(MainHWND(), timer_smooth_scroll, timer_smooth_scroll_interval, 0);
+}
+
+void ScintillaWin::SmoothPageMove(int direction, Selection::SelTypes selt, bool stuttered) {
+	// Mirror Editor::PageMove caret logic, but animate the vertical scroll.
+	Sci::Line topLineNew;
+	SelectionPosition newPos;
+
+	const Sci::Line currentLine = pdoc->SciLineFromPosition(sel.MainCaret());
+	const Sci::Line baseTop = scrollJob.active ? scrollJob.scrollEd : topLine;
+	const Sci::Line topStutterLine = baseTop + caretPolicies.y.slop;
+	const Sci::Line bottomStutterLine =
+		pdoc->SciLineFromPosition(PositionFromLocation(
+			Point::FromInts(lastXChosen - xOffset, direction * vs.lineHeight * static_cast<int>(LinesToScroll()))))
+		- caretPolicies.y.slop - 1;
+
+	if (stuttered && (direction < 0 && currentLine > topStutterLine)) {
+		topLineNew = baseTop;
+		newPos = SPositionFromLocation(Point::FromInts(lastXChosen - xOffset, vs.lineHeight * caretPolicies.y.slop),
+			false, false, UserVirtualSpace());
+	} else if (stuttered && (direction > 0 && currentLine < bottomStutterLine)) {
+		topLineNew = baseTop;
+		newPos = SPositionFromLocation(Point::FromInts(lastXChosen - xOffset, vs.lineHeight * static_cast<int>(LinesToScroll() - caretPolicies.y.slop)),
+			false, false, UserVirtualSpace());
+	} else {
+		const Point pt = LocationFromPosition(sel.MainCaret());
+		topLineNew = std::clamp<Sci::Line>(
+			baseTop + direction * LinesToScroll(), 0, MaxScrollPos());
+		newPos = SPositionFromLocation(
+			Point::FromInts(lastXChosen - xOffset, static_cast<int>(pt.y) +
+				direction * (vs.lineHeight * static_cast<int>(LinesToScroll()))),
+			false, false, UserVirtualSpace());
+	}
+
+	if (topLineNew != baseTop) {
+		// Move caret immediately; animate view to the destination page.
+		MovePositionTo(newPos, selt, false);
+		SmoothScrollBy(topLineNew - baseTop);
+	} else {
+		MovePositionTo(newPos, selt);
+	}
+}
+
+int ScintillaWin::KeyCommand(Message iMessage) {
+	// When autocomplete is active, Page Up/Down navigate the list — leave that to ScintillaBase.
+	if (smoothScrolling && !ac.Active()) {
+		int direction = 0;
+		Selection::SelTypes selt = Selection::SelTypes::none;
+		bool stuttered = false;
+		bool isPageCommand = true;
+		switch (iMessage) {
+		case Message::StutteredPageUp:
+			direction = -1; stuttered = true; break;
+		case Message::StutteredPageUpExtend:
+			direction = -1; selt = Selection::SelTypes::stream; stuttered = true; break;
+		case Message::StutteredPageDown:
+			direction = 1; stuttered = true; break;
+		case Message::StutteredPageDownExtend:
+			direction = 1; selt = Selection::SelTypes::stream; stuttered = true; break;
+		case Message::PageUp:
+			direction = -1; break;
+		case Message::PageUpExtend:
+			direction = -1; selt = Selection::SelTypes::stream; break;
+		case Message::PageUpRectExtend:
+			direction = -1; selt = Selection::SelTypes::rectangle; break;
+		case Message::PageDown:
+			direction = 1; break;
+		case Message::PageDownExtend:
+			direction = 1; selt = Selection::SelTypes::stream; break;
+		case Message::PageDownRectExtend:
+			direction = 1; selt = Selection::SelTypes::rectangle; break;
+		default:
+			isPageCommand = false; break;
+		}
+		if (isPageCommand) {
+			// Match ScintillaBase: page movement dismisses an open call tip.
+			if (ct.inCallTipMode) {
+				ct.CallTipCancel();
+			}
+			SmoothPageMove(direction, selt, stuttered);
+			return 0;
+		}
+	}
+	return ScintillaBase::KeyCommand(iMessage);
+}
+
 void ScintillaWin::ScrollMessage(WPARAM wParam) {
 	//DWORD dwStart = timeGetTime();
 	//Platform::DebugPrintf("Scroll %x %d\n", wParam, lParam);
@@ -3723,8 +3928,15 @@ void ScintillaWin::ScrollMessage(WPARAM wParam) {
 
 	//Platform::DebugPrintf("ScrollInfo %d mask=%x min=%d max=%d page=%d pos=%d track=%d\n", b,sci.fMask,
 	//sci.nMin, sci.nMax, sci.nPage, sci.nPos, sci.nTrackPos);
+	const int scrollCode = LOWORD(wParam);
+	if (smoothScrolling && (scrollCode == SB_PAGEUP || scrollCode == SB_PAGEDOWN)) {
+		const Sci::Line linesToScroll = (scrollCode == SB_PAGEUP) ? -LinesToScroll() : LinesToScroll();
+		SmoothScrollBy(linesToScroll);
+		return;
+	}
+
 	Sci::Line topLineNew = topLine;
-	switch (LOWORD(wParam)) {
+	switch (scrollCode) {
 	case SB_LINEUP:
 		topLineNew -= 1;
 		break;
