@@ -4098,6 +4098,50 @@ void ScintillaEditView::scrollPosToCenter(size_t pos)
 	execute(SCI_ENSUREVISIBLEENFORCEPOLICY, line);
 }
 
+void ScintillaEditView::goToPosSmooth(intptr_t pos)
+{
+	const bool useSmooth = execute(SCI_GETSMOOTHSCROLLING) != 0;
+	const intptr_t startTop = execute(SCI_GETFIRSTVISIBLELINE);
+	const intptr_t startXOffset = execute(SCI_GETXOFFSET);
+	const HWND hSci = getHSelf();
+
+	if (useSmooth)
+	{
+		// Resolve the final scroll position with instant scrolling, without painting
+		// intermediate jumps or nesting a smooth-scroll job mid-calculation.
+		execute(SCI_SETSMOOTHSCROLLING, false);
+		::SendMessage(hSci, WM_SETREDRAW, FALSE, 0);
+	}
+
+	// Unfold if needed, then move caret (SCI_GOTOPOS also ensures caret visibility).
+	execute(SCI_ENSUREVISIBLE, execute(SCI_LINEFROMPOSITION, pos));
+	execute(SCI_GOTOPOS, pos);
+	execute(SCI_CHOOSECARETX);
+
+	if (useSmooth)
+	{
+		const intptr_t endTop = execute(SCI_GETFIRSTVISIBLELINE);
+		const intptr_t endXOffset = execute(SCI_GETXOFFSET);
+
+		// Rewind to the origin (still unpainted), then animate from there.
+		if (endTop != startTop)
+			execute(SCI_SETFIRSTVISIBLELINE, startTop);
+		if (endXOffset != startXOffset)
+			execute(SCI_SETXOFFSET, startXOffset);
+
+		::SendMessage(hSci, WM_SETREDRAW, TRUE, 0);
+		execute(SCI_SETSMOOTHSCROLLING, true);
+		::InvalidateRect(hSci, nullptr, TRUE);
+
+		if (endTop != startTop)
+			execute(SCI_SMOOTHSCROLLTO, endTop);
+
+		// Horizontal remains instant (smooth scrolling is vertical-only).
+		if (endXOffset != startXOffset)
+			execute(SCI_SETXOFFSET, endXOffset);
+	}
+}
+
 void ScintillaEditView::hideLines()
 {
 	// Unfolding can screw up hide lines badly if it unfolds a hidden section.

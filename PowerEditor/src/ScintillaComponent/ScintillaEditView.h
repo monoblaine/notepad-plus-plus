@@ -679,6 +679,10 @@ public:
 				(_codepage == CP_JAPANESE) || (_codepage == CP_KOREAN));
 	}
 	void scrollPosToCenter(size_t pos);
+
+	// Move caret to pos (like SCI_GOTOPOS). When smooth scrolling is enabled and the
+	// destination is off-screen, animate the vertical scroll instead of jumping.
+	void goToPosSmooth(intptr_t pos);
 	std::wstring getEOLString() const;
 	void setBorderEdge(bool doWithBorderEdge);
 	void sortLines(size_t fromLine, size_t toLine, ISorter *pSort);
