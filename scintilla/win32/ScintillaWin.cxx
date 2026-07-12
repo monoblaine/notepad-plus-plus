@@ -703,6 +703,7 @@ class ScintillaWin :
 	void CopyToGlobal(GlobalMemory &gmUnicode, const SelectionText &selectedText);
 	void CopyToClipboard(const SelectionText &selectedText) override;
 	void SmoothScrollBy(Sci::Line linesToScroll);
+	void SmoothScrollTo(Sci::Line targetLine);
 	void SmoothPageMove(int direction, Selection::SelTypes selt = Selection::SelTypes::none, bool stuttered = false);
 	int KeyCommand(Scintilla::Message iMessage) override;
 	void ScrollMessage(WPARAM wParam);
@@ -2312,6 +2313,7 @@ sptr_t ScintillaWin::SciMessage(Message iMessage, uptr_t wParam, sptr_t lParam) 
 		if (!smoothScrolling) {
 			::KillTimer(MainHWND(), timer_smooth_scroll);
 			view.scrollOffset = 0;
+			scrollJob.active = false;
 		}
 		return true;
 	case Message::SetTechnology:
@@ -2609,6 +2611,14 @@ sptr_t ScintillaWin::WndProc(Message iMessage, uptr_t wParam, sptr_t lParam) {
 		case Message::TargetAsUTF8:
 		case Message::EncodedFromUTF8:
 			return SciMessage(iMessage, wParam, lParam);
+
+		case Message::SetFirstVisibleLine:
+			// Animate absolute vertical jumps (e.g. find-result navigation) when smooth scrolling is on.
+			if (smoothScrolling) {
+				SmoothScrollTo(LineFromUPtr(wParam));
+				return 0;
+			}
+			return ScintillaBase::WndProc(iMessage, wParam, lParam);
 
 		default:
 			return ScintillaBase::WndProc(iMessage, wParam, lParam);
@@ -3728,6 +3738,12 @@ void ScintillaWin::SmoothScrollBy(Sci::Line linesToScroll) {
 			scrollJob.spd = spd;
 		}
 	}
+}
+
+void ScintillaWin::SmoothScrollTo(Sci::Line targetLine) {
+	const Sci::Line target = std::clamp<Sci::Line>(targetLine, 0, MaxScrollPos());
+	const Sci::Line from = scrollJob.active ? scrollJob.scrollEd : topLine;
+	SmoothScrollBy(target - from);
 }
 
 void ScintillaWin::SmoothPageMove(int direction, Selection::SelTypes selt, bool stuttered) {
