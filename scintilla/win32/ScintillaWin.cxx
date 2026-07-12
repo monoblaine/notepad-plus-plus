@@ -2446,9 +2446,11 @@ sptr_t ScintillaWin::WndProc(Message iMessage, uptr_t wParam, sptr_t lParam) {
 					if (t >= 1.0f) {
 						finished = true;
 					} else {
-						// Ease-out cubic: fast start, short settle — short hops feel snappier.
-						const float inv = 1.0f - t;
-						const float eased = 1.0f - inv * inv * inv;
+						// Ease-in-out cubic: visible motion through the middle, soft land.
+						// (Pure ease-out reads as "almost instant" on short hops.)
+						const float eased = (t < 0.5f)
+							? (4.0f * t * t * t)
+							: (1.0f - std::pow(-2.0f * t + 2.0f, 3.0f) / 2.0f);
 						newProg = eased * scrollJob.totalPx * static_cast<float>(scrollJob.direction);
 					}
 				} else {
@@ -3811,10 +3813,12 @@ void ScintillaWin::SmoothScrollTo(Sci::Line targetLine) {
 	const float distance = static_cast<float>(std::abs(delta));
 	const float lineH = static_cast<float>(std::max(vs.lineHeight, 1));
 	const float screens = distance / static_cast<float>(std::max<Sci::Line>(LinesOnScreen(), 1));
-	// Short (≤1 screen) hops: ~45ms. Longer jumps scale up gently, capped ~100ms.
+	// Long enough to read as smooth motion, short enough not to feel sluggish.
+	// Wall-clock timing keeps this honest even when paints are slow.
+	// ≤1 screen ≈ 200ms; each extra screen adds a bit, hard cap ~320ms.
 	const float durationMs = (screens <= 1.0f)
-		? 45.0f
-		: std::min(45.0f + (screens - 1.0f) * 25.0f, 100.0f);
+		? 200.0f
+		: std::min(200.0f + (screens - 1.0f) * 40.0f, 320.0f);
 
 	scrollJob.active = true;
 	scrollJob.timeBased = true;
