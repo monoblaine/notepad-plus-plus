@@ -702,6 +702,9 @@ class ScintillaWin :
 	void GetMouseParameters() noexcept;
 	void CopyToGlobal(GlobalMemory &gmUnicode, const SelectionText &selectedText);
 	void CopyToClipboard(const SelectionText &selectedText) override;
+	void SmoothScrollBy(Sci::Line linesToScroll);
+	void SmoothPageMove(int direction, Selection::SelTypes selt = Selection::SelTypes::none, bool stuttered = false);
+	int KeyCommand(Scintilla::Message iMessage) override;
 	void ScrollMessage(WPARAM wParam);
 	void HorizontalScrollMessage(WPARAM wParam);
 	void FullPaint();
@@ -1992,36 +1995,8 @@ sptr_t ScintillaWin::MouseMessage(unsigned int iMessage, uptr_t wParam, sptr_t l
 				}
 			} else {
 				// Scroll
-				//smoothScrollTo(topLine + linesToScroll);
 				if (smoothScrolling) {
-					if (!scrollJob.active) {
-						scrollJob.active = true;
-						scrollJob.scrollSt = topLine;
-						scrollJob.scrollEd = std::clamp<Sci::Line>(topLine + linesToScroll, 0, MaxScrollPos());
-						scrollJob.progress = 0;
-						scrollJob.direction = linesToScroll < 0 ? -1 : 1;
-						scrollJob.spd = 6;
-						::SetTimer(MainHWND(), timer_smooth_scroll, timer_smooth_scroll_interval, 0);
-					} else {
-						//::KillTimer(MainHWND(), timer_smooth_scroll);
-						scrollJob.scrollEd = std::clamp<Sci::Line>(scrollJob.scrollEd + linesToScroll, 0, MaxScrollPos());
-						if (scrollJob.scrollEd < topLine) {
-							scrollJob.direction = -1;
-						} else if (scrollJob.scrollEd > topLine) {
-							scrollJob.direction = 1;
-						} else {
-							scrollJob.direction = linesToScroll < 0 ? -1 : 1;
-						}
-						float spd = 5;
-						float spdFac = fabs(topLine - scrollJob.scrollEd) / fmax(linesPerScroll, 1);
-						if (spdFac > 1) {
-							spd *= spdFac;
-						}
-						if (spd > scrollJob.spd) {
-							scrollJob.spd = spd;
-						}
-						//::SetTimer(MainHWND(), timer_smooth_scroll, timer_smooth_scroll_interval, 0);
-					}
+					SmoothScrollBy(linesToScroll);
 				} else {
 					ScrollTo(topLine + linesToScroll);
 				}
@@ -3711,6 +3686,133 @@ void ScintillaWin::CopyToClipboard(const SelectionText &selectedText) {
 	}
 }
 
+void ScintillaWin::SmoothScrollBy(Sci::Line linesToScroll) {
+	if (linesToScroll == 0) {
+		return;
+	}
+	if (!scrollJob.active) {
+		const Sci::Line target = std::clamp<Sci::Line>(topLine + linesToScroll, 0, MaxScrollPos());
+		if (target == topLine) {
+			return;
+		}
+		scrollJob.active = true;
+		scrollJob.scrollSt = topLine;
+		scrollJob.scrollEd = target;
+		scrollJob.progress = 0;
+		scrollJob.direction = linesToScroll < 0 ? -1 : 1;
+		// Larger distances (page jumps) start faster so animation does not feel sluggish.
+		const float distance = static_cast<float>(std::abs(target - topLine));
+		const float refLines = static_cast<float>(
+			(linesPerScroll == 0 || linesPerScroll == WHEEL_PAGESCROLL) ? 3u : linesPerScroll);
+		scrollJob.spd = std::max(6.0f, 6.0f * (distance / std::max(refLines, 1.0f)));
+		::SetTimer(MainHWND(), timer_smooth_scroll, timer_smooth_scroll_interval, 0);
+	} else {
+		scrollJob.scrollEd = std::clamp<Sci::Line>(scrollJob.scrollEd + linesToScroll, 0, MaxScrollPos());
+		if (scrollJob.scrollEd < topLine) {
+			scrollJob.direction = -1;
+		} else if (scrollJob.scrollEd > topLine) {
+			scrollJob.direction = 1;
+		} else {
+			scrollJob.direction = linesToScroll < 0 ? -1 : 1;
+		}
+		// Scale speed with distance so large jumps (e.g. page scroll) stay responsive.
+		const float distance = static_cast<float>(std::abs(topLine - scrollJob.scrollEd));
+		const float refLines = static_cast<float>(
+			(linesPerScroll == 0 || linesPerScroll == WHEEL_PAGESCROLL) ? 3u : linesPerScroll);
+		float spd = 5;
+		const float spdFac = distance / std::max(refLines, 1.0f);
+		if (spdFac > 1) {
+			spd *= spdFac;
+		}
+		if (spd > scrollJob.spd) {
+			scrollJob.spd = spd;
+		}
+	}
+}
+
+void ScintillaWin::SmoothPageMove(int direction, Selection::SelTypes selt, bool stuttered) {
+	// Mirror Editor::PageMove caret logic, but animate the vertical scroll.
+	Sci::Line topLineNew;
+	SelectionPosition newPos;
+
+	const Sci::Line currentLine = pdoc->SciLineFromPosition(sel.MainCaret());
+	const Sci::Line baseTop = scrollJob.active ? scrollJob.scrollEd : topLine;
+	const Sci::Line topStutterLine = baseTop + caretPolicies.y.slop;
+	const Sci::Line bottomStutterLine =
+		pdoc->SciLineFromPosition(PositionFromLocation(
+			Point::FromInts(lastXChosen - xOffset, direction * vs.lineHeight * static_cast<int>(LinesToScroll()))))
+		- caretPolicies.y.slop - 1;
+
+	if (stuttered && (direction < 0 && currentLine > topStutterLine)) {
+		topLineNew = baseTop;
+		newPos = SPositionFromLocation(Point::FromInts(lastXChosen - xOffset, vs.lineHeight * caretPolicies.y.slop),
+			false, false, UserVirtualSpace());
+	} else if (stuttered && (direction > 0 && currentLine < bottomStutterLine)) {
+		topLineNew = baseTop;
+		newPos = SPositionFromLocation(Point::FromInts(lastXChosen - xOffset, vs.lineHeight * static_cast<int>(LinesToScroll() - caretPolicies.y.slop)),
+			false, false, UserVirtualSpace());
+	} else {
+		const Point pt = LocationFromPosition(sel.MainCaret());
+		topLineNew = std::clamp<Sci::Line>(
+			baseTop + direction * LinesToScroll(), 0, MaxScrollPos());
+		newPos = SPositionFromLocation(
+			Point::FromInts(lastXChosen - xOffset, static_cast<int>(pt.y) +
+				direction * (vs.lineHeight * static_cast<int>(LinesToScroll()))),
+			false, false, UserVirtualSpace());
+	}
+
+	if (topLineNew != baseTop) {
+		// Move caret immediately; animate view to the destination page.
+		MovePositionTo(newPos, selt, false);
+		SmoothScrollBy(topLineNew - baseTop);
+	} else {
+		MovePositionTo(newPos, selt);
+	}
+}
+
+int ScintillaWin::KeyCommand(Message iMessage) {
+	// When autocomplete is active, Page Up/Down navigate the list — leave that to ScintillaBase.
+	if (smoothScrolling && !ac.Active()) {
+		int direction = 0;
+		Selection::SelTypes selt = Selection::SelTypes::none;
+		bool stuttered = false;
+		bool isPageCommand = true;
+		switch (iMessage) {
+		case Message::StutteredPageUp:
+			direction = -1; stuttered = true; break;
+		case Message::StutteredPageUpExtend:
+			direction = -1; selt = Selection::SelTypes::stream; stuttered = true; break;
+		case Message::StutteredPageDown:
+			direction = 1; stuttered = true; break;
+		case Message::StutteredPageDownExtend:
+			direction = 1; selt = Selection::SelTypes::stream; stuttered = true; break;
+		case Message::PageUp:
+			direction = -1; break;
+		case Message::PageUpExtend:
+			direction = -1; selt = Selection::SelTypes::stream; break;
+		case Message::PageUpRectExtend:
+			direction = -1; selt = Selection::SelTypes::rectangle; break;
+		case Message::PageDown:
+			direction = 1; break;
+		case Message::PageDownExtend:
+			direction = 1; selt = Selection::SelTypes::stream; break;
+		case Message::PageDownRectExtend:
+			direction = 1; selt = Selection::SelTypes::rectangle; break;
+		default:
+			isPageCommand = false; break;
+		}
+		if (isPageCommand) {
+			// Match ScintillaBase: page movement dismisses an open call tip.
+			if (ct.inCallTipMode) {
+				ct.CallTipCancel();
+			}
+			SmoothPageMove(direction, selt, stuttered);
+			return 0;
+		}
+	}
+	return ScintillaBase::KeyCommand(iMessage);
+}
+
 void ScintillaWin::ScrollMessage(WPARAM wParam) {
 	//DWORD dwStart = timeGetTime();
 	//Platform::DebugPrintf("Scroll %x %d\n", wParam, lParam);
@@ -3723,8 +3825,15 @@ void ScintillaWin::ScrollMessage(WPARAM wParam) {
 
 	//Platform::DebugPrintf("ScrollInfo %d mask=%x min=%d max=%d page=%d pos=%d track=%d\n", b,sci.fMask,
 	//sci.nMin, sci.nMax, sci.nPage, sci.nPos, sci.nTrackPos);
+	const int scrollCode = LOWORD(wParam);
+	if (smoothScrolling && (scrollCode == SB_PAGEUP || scrollCode == SB_PAGEDOWN)) {
+		const Sci::Line linesToScroll = (scrollCode == SB_PAGEUP) ? -LinesToScroll() : LinesToScroll();
+		SmoothScrollBy(linesToScroll);
+		return;
+	}
+
 	Sci::Line topLineNew = topLine;
-	switch (LOWORD(wParam)) {
+	switch (scrollCode) {
 	case SB_LINEUP:
 		topLineNew -= 1;
 		break;
