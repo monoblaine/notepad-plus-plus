@@ -801,6 +801,7 @@ enum class Message {
 	IndexPositionFromLine = 2714,
 	SetSmoothScrolling = 2916,
 	GetSmoothScrolling = 2917,
+	SmoothScrollTo = 2918,
 	GetDragDropEnabled = 2818,
 	SetDragDropEnabled = 2819,
 	StartRecord = 3001,

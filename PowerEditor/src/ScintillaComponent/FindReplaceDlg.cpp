@@ -295,9 +295,9 @@ void Searching::displaySectionCentered(size_t posStart, size_t posEnd, Scintilla
 		pEditView->execute(SCI_SETSMOOTHSCROLLING, true);
 		::InvalidateRect(hSci, nullptr, TRUE);
 
-		// Vertical: timer-based smooth scroll via SCI_SETFIRSTVISIBLELINE.
+		// Vertical: opt-in animated jump (SCI_SETFIRSTVISIBLELINE stays instant for tab restores).
 		if (endTop != startTop)
-			pEditView->execute(SCI_SETFIRSTVISIBLELINE, endTop);
+			pEditView->execute(SCI_SMOOTHSCROLLTO, endTop);
 
 		// Horizontal remains instant (smooth scrolling is vertical-only).
 		if (endXOffset != startXOffset)

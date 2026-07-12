@@ -3255,6 +3255,10 @@ bool ScintillaCall::SmoothScrolling() {
 	return static_cast<bool>(Call(Message::GetSmoothScrolling));
 }
 
+void ScintillaCall::SmoothScrollTo(Line displayLine) {
+	Call(Message::SmoothScrollTo, displayLine);
+}
+
 void *ScintillaCall::CreateLoader(Position bytes, Scintilla::DocumentOption documentOptions) {
 	return reinterpret_cast<void *>(Call(Message::CreateLoader, bytes, static_cast<intptr_t>(documentOptions)));
 }
