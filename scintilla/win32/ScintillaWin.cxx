@@ -470,10 +470,17 @@ namespace Scintilla::Internal {
 		float progress;
 		int direction;
 		float spd;
+		// Wall-clock absolute jumps (find results): progress is driven by elapsed time so
+		// slow paints cannot stretch a "100ms" animation into half a second.
+		bool timeBased = false;
+		ULONGLONG startMs = 0;
+		float durationMs = 0;
+		float totalPx = 0;
 	};
 
 	UINT_PTR timer_smooth_scroll = 0x123;
-	int timer_smooth_scroll_interval = 10;
+	// Poll often; actual step size for absolute jumps comes from elapsed wall time.
+	int timer_smooth_scroll_interval = 8;
 
 #if defined(USE_D2D)
 
@@ -2314,6 +2321,7 @@ sptr_t ScintillaWin::SciMessage(Message iMessage, uptr_t wParam, sptr_t lParam) 
 			::KillTimer(MainHWND(), timer_smooth_scroll);
 			view.scrollOffset = 0;
 			scrollJob.active = false;
+			scrollJob.timeBased = false;
 		}
 		return true;
 
@@ -2424,17 +2432,36 @@ sptr_t ScintillaWin::WndProc(Message iMessage, uptr_t wParam, sptr_t lParam) {
 			break;
 
 		case WM_TIMER:
-			if (wParam == idleTimerID && idler.state) {
-				SendMessage(MainHWND(), SC_WIN_IDLE, 0, 1);
-			} else {
-				TickFor(static_cast<TickReason>(wParam - fineTimerStart));
-			}
 			if (wParam == timer_smooth_scroll) {
-				float newProg = scrollJob.progress + scrollJob.spd * scrollJob.direction;
-				float newTop = scrollJob.scrollSt + newProg / vs.lineHeight;
-				if ((newTop - scrollJob.scrollEd) * scrollJob.direction >= 0) {
-					// stopped.
+				const float lineH = static_cast<float>(std::max(vs.lineHeight, 1));
+				float newProg = 0;
+				bool finished = false;
+
+				if (scrollJob.timeBased) {
+					// Map elapsed wall time → progress so dropped timer ticks / slow paints
+					// still finish on schedule instead of stretching the animation.
+					const ULONGLONG now = ::GetTickCount64();
+					const float elapsed = static_cast<float>(now - scrollJob.startMs);
+					float t = (scrollJob.durationMs > 0.0f) ? (elapsed / scrollJob.durationMs) : 1.0f;
+					if (t >= 1.0f) {
+						finished = true;
+					} else {
+						// Ease-out cubic: fast start, short settle — short hops feel snappier.
+						const float inv = 1.0f - t;
+						const float eased = 1.0f - inv * inv * inv;
+						newProg = eased * scrollJob.totalPx * static_cast<float>(scrollJob.direction);
+					}
+				} else {
+					newProg = scrollJob.progress + scrollJob.spd * scrollJob.direction;
+					const float newTopProbe = scrollJob.scrollSt + newProg / lineH;
+					if ((newTopProbe - scrollJob.scrollEd) * scrollJob.direction >= 0) {
+						finished = true;
+					}
+				}
+
+				if (finished) {
 					scrollJob.active = false;
+					scrollJob.timeBased = false;
 					::KillTimer(MainHWND(), wParam);
 					view.scrollOffset = 0;
 					const Sci::Line topLineNew = std::clamp<Sci::Line>(scrollJob.scrollEd, 0, MaxScrollPos());
@@ -2444,9 +2471,9 @@ sptr_t ScintillaWin::WndProc(Message iMessage, uptr_t wParam, sptr_t lParam) {
 						Redraw();
 					}
 				} else {
-					// simple smooth scroll.
+					const float newTop = scrollJob.scrollSt + newProg / lineH;
 					const Sci::Line topLineNew = std::clamp<Sci::Line>(newTop, 0, MaxScrollPos());
-					view.scrollOffset = ((topLineNew - scrollJob.scrollSt) * vs.lineHeight - newProg);
+					view.scrollOffset = static_cast<int>((topLineNew - scrollJob.scrollSt) * lineH - newProg);
 					scrollJob.progress = newProg;
 					if (topLine != topLineNew) {
 						ScrollTo(topLineNew);
@@ -2454,6 +2481,10 @@ sptr_t ScintillaWin::WndProc(Message iMessage, uptr_t wParam, sptr_t lParam) {
 						Redraw();
 					}
 				}
+			} else if (wParam == idleTimerID && idler.state) {
+				SendMessage(MainHWND(), SC_WIN_IDLE, 0, 1);
+			} else {
+				TickFor(static_cast<TickReason>(wParam - fineTimerStart));
 			}
 			break;
 
@@ -2630,6 +2661,7 @@ sptr_t ScintillaWin::WndProc(Message iMessage, uptr_t wParam, sptr_t lParam) {
 			if (scrollJob.active) {
 				::KillTimer(MainHWND(), timer_smooth_scroll);
 				scrollJob.active = false;
+				scrollJob.timeBased = false;
 				view.scrollOffset = 0;
 			}
 			return ScintillaBase::WndProc(iMessage, wParam, lParam);
@@ -3720,6 +3752,7 @@ void ScintillaWin::SmoothScrollBy(Sci::Line linesToScroll) {
 			return;
 		}
 		scrollJob.active = true;
+		scrollJob.timeBased = false;
 		scrollJob.scrollSt = topLine;
 		scrollJob.scrollEd = target;
 		scrollJob.progress = 0;
@@ -3730,6 +3763,9 @@ void ScintillaWin::SmoothScrollBy(Sci::Line linesToScroll) {
 			(linesPerScroll == 0 || linesPerScroll == WHEEL_PAGESCROLL) ? 3u : linesPerScroll);
 		scrollJob.spd = std::max(6.0f, 6.0f * (distance / std::max(refLines, 1.0f)));
 		::SetTimer(MainHWND(), timer_smooth_scroll, timer_smooth_scroll_interval, 0);
+	} else if (scrollJob.timeBased) {
+		// Wheel input during a find-style jump: retarget as a new absolute hop from here.
+		SmoothScrollTo(std::clamp<Sci::Line>(topLine + linesToScroll, 0, MaxScrollPos()));
 	} else {
 		scrollJob.scrollEd = std::clamp<Sci::Line>(scrollJob.scrollEd + linesToScroll, 0, MaxScrollPos());
 		if (scrollJob.scrollEd < topLine) {
@@ -3755,50 +3791,42 @@ void ScintillaWin::SmoothScrollBy(Sci::Line linesToScroll) {
 }
 
 void ScintillaWin::SmoothScrollTo(Sci::Line targetLine) {
-	// Absolute jumps (find navigation) use a duration-based speed so short hops feel as
-	// snappy as long ones. Wheel scrolling keeps the softer SmoothScrollBy tuning.
+	// Absolute jumps (find navigation): wall-clock duration so short hops stay snappy even
+	// when each frame's paint takes longer than the timer interval.
 	const Sci::Line target = std::clamp<Sci::Line>(targetLine, 0, MaxScrollPos());
-	const Sci::Line from = scrollJob.active ? scrollJob.scrollEd : topLine;
+	// Anchor from the live top line so a redirected mid-flight jump doesn't overshoot.
+	const Sci::Line from = topLine;
 	const Sci::Line delta = target - from;
 	if (delta == 0) {
+		if (scrollJob.active) {
+			scrollJob.active = false;
+			scrollJob.timeBased = false;
+			::KillTimer(MainHWND(), timer_smooth_scroll);
+			view.scrollOffset = 0;
+			Redraw();
+		}
 		return;
 	}
 
 	const float distance = static_cast<float>(std::abs(delta));
 	const float lineH = static_cast<float>(std::max(vs.lineHeight, 1));
-	// ~100ms to destination at 10ms ticks; floor velocity so small nudges still zip.
-	constexpr float targetMs = 100.0f;
-	const float targetTicks = targetMs / static_cast<float>(std::max(timer_smooth_scroll_interval, 1));
-	const float distPx = distance * lineH;
-	float spd = distPx / std::max(targetTicks, 1.0f);
-	// At least one screen-height per target duration (short jumps finish even sooner).
-	const float minSpd = static_cast<float>(std::max<Sci::Line>(LinesOnScreen(), 1)) * lineH
-		/ std::max(targetTicks, 1.0f);
-	if (spd < minSpd) {
-		spd = minSpd;
-	}
+	const float screens = distance / static_cast<float>(std::max<Sci::Line>(LinesOnScreen(), 1));
+	// Short (≤1 screen) hops: ~45ms. Longer jumps scale up gently, capped ~100ms.
+	const float durationMs = (screens <= 1.0f)
+		? 45.0f
+		: std::min(45.0f + (screens - 1.0f) * 25.0f, 100.0f);
 
-	if (!scrollJob.active) {
-		scrollJob.active = true;
-		scrollJob.scrollSt = topLine;
-		scrollJob.scrollEd = target;
-		scrollJob.progress = 0;
-		scrollJob.direction = delta < 0 ? -1 : 1;
-		scrollJob.spd = spd;
-		::SetTimer(MainHWND(), timer_smooth_scroll, timer_smooth_scroll_interval, 0);
-	} else {
-		scrollJob.scrollEd = target;
-		if (scrollJob.scrollEd < topLine) {
-			scrollJob.direction = -1;
-		} else if (scrollJob.scrollEd > topLine) {
-			scrollJob.direction = 1;
-		} else {
-			scrollJob.direction = delta < 0 ? -1 : 1;
-		}
-		if (spd > scrollJob.spd) {
-			scrollJob.spd = spd;
-		}
-	}
+	scrollJob.active = true;
+	scrollJob.timeBased = true;
+	scrollJob.scrollSt = from;
+	scrollJob.scrollEd = target;
+	scrollJob.progress = 0;
+	scrollJob.direction = delta < 0 ? -1 : 1;
+	scrollJob.totalPx = distance * lineH;
+	scrollJob.durationMs = durationMs;
+	scrollJob.startMs = ::GetTickCount64();
+	scrollJob.spd = 0; // unused in time-based mode
+	::SetTimer(MainHWND(), timer_smooth_scroll, timer_smooth_scroll_interval, 0);
 }
 
 void ScintillaWin::SmoothPageMove(int direction, Selection::SelTypes selt, bool stuttered) {
